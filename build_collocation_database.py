@@ -154,16 +154,9 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
         
         filename_list = pd.Series(found_MODIS_files[0], index=caliop_df.index)
 
-        for id in caliop_df.index:
-            if caliop_df.modis_idx[id] < number_of_pixels_in_one_file:
-                file_no = 0
-            else:
-                file_no = 1
-                caliop_df.loc[id, "modis_idx"] = caliop_df.loc[id, "modis_idx"] - number_of_pixels_in_one_file
+        caliop_df["MODIS_file"] = np.where(caliop_df.modis_idx < number_of_pixels_in_one_file, found_MODIS_files[0], found_MODIS_files[1])
+        caliop_df.modis_idx = np.where(caliop_df.modis_idx < number_of_pixels_in_one_file, caliop_df.modis_idx, caliop_df.modis_idx - number_of_pixels_in_one_file)
 
-            filename_list[id] = found_MODIS_files[file_no]
-
-        caliop_df["MODIS_file"] = filename_list
 
     if number_of_found_MODIS_files == 1:
         MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[0]))
