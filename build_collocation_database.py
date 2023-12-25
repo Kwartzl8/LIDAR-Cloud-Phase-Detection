@@ -1,4 +1,6 @@
 import os
+import glob
+import re
 from caliop import Caliop_hdf_reader
 from shapely.geometry import Point
 import pandas as pd
@@ -14,14 +16,8 @@ import numpy as np
 from sklearn.neighbors import KDTree
 import tqdm
 import argparse
-import warnings
     
 def find_MODIS_files(folder_to_search, start_datetime, end_datetime, MODIS_product="MYD35"):
-    import glob
-    import os
-    import re
-    import datetime
-
     search_pattern = "**/" + MODIS_product + "*.hdf"
     filepaths = glob.glob(search_pattern, root_dir=folder_to_search, recursive=True)
 
@@ -151,8 +147,8 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
                                     MODIS_reader2.select("Latitude").get()], axis=0)
         
         number_of_pixels_in_one_file = int(np.size(modis_lat) / 2)
-        # print(number_of_pixels_in_one_file)
 
+        # TODO deal with the case of missing MODIS files by calculating the average discrepancy between modis and caliop coords
         caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
             collocate_pixels(caliop_df.long, caliop_df.lat, modis_long, modis_lat)
         
