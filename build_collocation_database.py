@@ -1,5 +1,4 @@
 import os
-import glob
 import re
 from caliop import Caliop_hdf_reader
 from shapely.geometry import Point
@@ -16,42 +15,46 @@ import numpy as np
 from sklearn.neighbors import KDTree
 import tqdm
 import argparse
+
+def find_MODIS_files_in_interval(folder_to_search, start_datetime, end_datetime,
+                        delay_minutes,
+                        tolerance_minutes):
+
+    # if tolerance_minutes > 2.5, we can get more than 2 modis files, which breaks things
+    # TODO implement error message
     
-def find_MODIS_files(folder_to_search, start_datetime, end_datetime, MODIS_product="MYD35"):
-    search_pattern = "**/" + MODIS_product + "*.hdf"
-    filepaths = glob.glob(search_pattern, root_dir=folder_to_search, recursive=True)
+    # consider delay between satellites and give some tolerance
+    lower_bound = start_datetime + datetime.timedelta(minutes = - delay_minutes - tolerance_minutes)
+    upper_bound = end_datetime + datetime.timedelta(minutes = - delay_minutes + tolerance_minutes)
+    
+    # round down to 5 mins, as that is how modis data is chunked
+    from math import floor
+    lower_bound = lower_bound.replace(minute=floor(lower_bound.minute / 5) * 5, second=0, microsecond=0)
+    upper_bound = upper_bound.replace(minute=floor(upper_bound.minute / 5) * 5, second=0, microsecond=0)
 
-    filepaths_in_interval = []
+    modis_files_selected = int(((upper_bound - lower_bound).seconds / 60) / 5 + 1)
 
-    # make up a regex pattern
-    pattern = re.compile(r'(?P<product_name>[^.]+?)\.A(?P<year>\d{4})(?P<day_of_year>\d{3})\.(?P<time>\d{4})\..+\.hdf')
+    search_strings = [""] * modis_files_selected
+    filename_list = [""] * modis_files_selected
+    
+    import glob
+    for i in range(modis_files_selected):
+        # construct the search strings in the format \AYYYYDDD\.HHMM where DDD is the day of the year
+        modis_start_time = lower_bound + datetime.timedelta(minutes=5*i)
+        day_of_year = (modis_start_time - modis_start_time.replace(month=1, day=1)).days + 1
+        search_strings[i] = "A" + str(modis_start_time.year) + str(day_of_year).zfill(3) + "." +\
+                            str(modis_start_time.hour).zfill(2) + str(modis_start_time.minute).zfill(2)
+        
+        found_files = glob.glob("**/*" + search_strings[i] + "*.hdf", root_dir=folder_to_search, recursive=True)
 
-    for file_index in range(len(filepaths)):
-        filename = os.path.basename(filepaths[file_index])
-        match = pattern.search(filename)
-
-        if not match:
-            # TODO set up a warning
-            warning_flag = 1
+        if len(found_files) != 1:
+            # something went terribly wrong
+            # TODO have the case where no files are found or when multiples files are found
             continue
         
-        # Extract information from the matched groups
-        product_name = match.group('product_name')
-        year = int(match.group('year'))
-        day_of_year = int(match.group('day_of_year'))
-        hour = int(match.group('time')[:2])
-        minute = int(match.group('time')[2:])
-
-        # put everything together in a datetime object
-        MODIS_frame_datetime = datetime.datetime(year=year, month=1, day=1, hour=hour, minute=minute) +\
-                                datetime.timedelta(days=day_of_year-1)
-        
-        if (MODIS_frame_datetime + datetime.timedelta(minutes=5) < start_datetime) or (MODIS_frame_datetime > end_datetime):
-            continue
-
-        filepaths_in_interval.append(filepaths[file_index])
+        filename_list[i] = found_files[0]
     
-    return filepaths_in_interval
+    return search_strings, filename_list
 
 def collocate_pixels(caliop_long, caliop_lat, modis_long, modis_lat, k_neighbors=1):
     modis_long = modis_long.flatten()
@@ -61,11 +64,11 @@ def collocate_pixels(caliop_long, caliop_lat, modis_long, modis_lat, k_neighbors
     caliop_query_points = list(zip(caliop_long * np.cos(np.pi * caliop_lat / 180), caliop_lat))
 
     # TODO check if caliop datapoints are enveloped by modis pixels
-    _, indices = modis_kdtree.query(caliop_query_points, k=k_neighbors)
+    distances, indices = modis_kdtree.query(caliop_query_points, k=k_neighbors)
 
-    return indices, modis_long[indices], modis_lat[indices]
+    return distances, indices, modis_long[indices], modis_lat[indices]
 
-def plot_collocation(CALIOP_filename, collocation_df):
+def plot_collocation(CALIOP_filename, collocation_df, found_MODIS_files):
     MODIS_filenames = collocation_df.MODIS_file.unique()
     number_of_found_MODIS_files = len(MODIS_filenames)
 
@@ -81,7 +84,7 @@ def plot_collocation(CALIOP_filename, collocation_df):
     for modis_filename, color in zip(MODIS_filenames, colors):
         ax.scatter(collocation_df.modis_long[collocation_df.MODIS_file == modis_filename],
                    collocation_df.modis_lat[collocation_df.MODIS_file == modis_filename],
-                   label=modis_filename, transform=ccrs.PlateCarree(), c=color)
+                   label=found_MODIS_files[modis_filename], transform=ccrs.PlateCarree(), c=color)
     
     ax.plot(collocation_df.long, collocation_df.lat, label="caliop track", c="r", transform=ccrs.PlateCarree())
     ax.set_title(CALIOP_filename)
@@ -96,7 +99,7 @@ def plot_collocation(CALIOP_filename, collocation_df):
 
 def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
                                          MODIS_pre_path="/neodc/modis/data/MYD03/collection61",
-                                         delay_minutes=2.2,
+                                         delay_minutes=2,
                                          tolerance_minutes=0.5,
                                          save_img=False):
     
@@ -129,7 +132,9 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     MODIS_path = os.path.join(MODIS_pre_path, start_datetime.strftime("%Y"),\
                               start_datetime.strftime("%m"), start_datetime.strftime("%d"))
     
-    found_MODIS_files = find_MODIS_files(MODIS_path, start_datetime, end_datetime, MODIS_product="MYD35")
+    stripped_dates, found_MODIS_files = find_MODIS_files_in_interval(MODIS_path, caliop_df.time.iloc[0], caliop_df.time.iloc[-1],
+                          delay_minutes,
+                          tolerance_minutes)
     number_of_found_MODIS_files = len(found_MODIS_files)
 
     if number_of_found_MODIS_files == 0:
@@ -138,47 +143,44 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     if number_of_found_MODIS_files > 2:
         return "too many MODIS files found"
 
+    MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[0]))
+    modis_long = MODIS_reader.select("Longitude").get()
+    modis_lat = MODIS_reader.select("Latitude").get()
+    number_of_pixels_in_first_file = np.size(modis_long)
+
     if number_of_found_MODIS_files == 2:
-        MODIS_reader1 = SD(os.path.join(MODIS_path, found_MODIS_files[0]))
-        MODIS_reader2 = SD(os.path.join(MODIS_path, found_MODIS_files[1]))
-        modis_long = np.concatenate([MODIS_reader1.select("Longitude").get(),\
-                                    MODIS_reader2.select("Longitude").get()], axis=0)
-        modis_lat = np.concatenate([MODIS_reader1.select("Latitude").get(),\
-                                    MODIS_reader2.select("Latitude").get()], axis=0)
-        
-        number_of_pixels_in_one_file = int(np.size(modis_lat) / 2)
+        MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[1]))
+        modis_long = np.concatenate([modis_long,\
+                                    MODIS_reader.select("Longitude").get()], axis=0)
+        modis_lat = np.concatenate([modis_lat,\
+                                    MODIS_reader.select("Latitude").get()], axis=0)
 
-        # TODO deal with the case of missing MODIS files by calculating the average discrepancy between modis and caliop coords
-        caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
-            collocate_pixels(caliop_df.long, caliop_df.lat, modis_long, modis_lat)
-        
-        filename_list = pd.Series(found_MODIS_files[0], index=caliop_df.index)
+    # TODO deal with the case of missing MODIS files by calculating the average discrepancy between modis and caliop coords
+    distances, caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
+        collocate_pixels(caliop_df.long, caliop_df.lat, modis_long, modis_lat)
+    
+    valid_collocations = distances < 1.1 * 5 * 1.4142 / 6371
 
-        caliop_df["MODIS_file"] = np.where(caliop_df.modis_idx < number_of_pixels_in_one_file, found_MODIS_files[0], found_MODIS_files[1])
-        caliop_df.modis_idx = np.where(caliop_df.modis_idx < number_of_pixels_in_one_file, caliop_df.modis_idx, caliop_df.modis_idx - number_of_pixels_in_one_file)
-
-
-    if number_of_found_MODIS_files == 1:
-        MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[0]))
-        modis_long = MODIS_reader.select("Longitude").get()
-        modis_lat = MODIS_reader.select("Latitude").get()
-
-        caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
-            collocate_pixels(caliop_df.long, caliop_df.lat, modis_long, modis_lat)
-        
-        filename_list = pd.Series(found_MODIS_files[0], index=caliop_df.index)
-        caliop_df["MODIS_file"] = filename_list
-
+    caliop_df["MODIS_file"] = np.where(caliop_df.modis_idx < number_of_pixels_in_first_file, 0, 1)
+    caliop_df.modis_idx = np.where(caliop_df.modis_idx < number_of_pixels_in_first_file,\
+                                   caliop_df.modis_idx, caliop_df.modis_idx - number_of_pixels_in_first_file)
+    
     collocation_path = os.path.join("./collocation_database",
-                                    start_datetime.strftime("%Y"), start_datetime.strftime("%m"))
+                        start_datetime.strftime("%Y"), start_datetime.strftime("%m"))
+    
+    os.makedirs(collocation_path, exist_ok=True)
+    csv_path = os.path.join(collocation_path, csv_name)
 
-    if not os.path.exists(collocation_path):
-        os.makedirs(collocation_path)
+    with open(csv_path, 'w') as file:
+        file.write(caliop_df.time.iloc[0].strftime("%H:%M:%S") + " " + \
+                   caliop_df.time.iloc[-1].strftime("%H:%M:%S") + "\n")
+        file.writelines([modis_file + " " for modis_file in stripped_dates])
+        file.write("\n\n")
 
-    caliop_df.to_csv(os.path.join(collocation_path, csv_name))
+    caliop_df[["modis_idx", "MODIS_file"]].to_csv(csv_path, mode='a')
 
     if save_img:
-        plot_collocation(csv_name[0:-4], caliop_df)
+        plot_collocation(csv_name[0:-4], caliop_df, stripped_dates)
 
     return "ok"
 
