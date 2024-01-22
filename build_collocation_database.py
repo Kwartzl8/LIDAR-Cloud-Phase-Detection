@@ -15,6 +15,10 @@ import numpy as np
 from sklearn.neighbors import KDTree
 import tqdm
 import argparse
+import subprocess
+import tempfile as tmp
+
+from merge_collocations import merge_collocation_data
 
 def find_MODIS_files_in_interval(folder_to_search, start_datetime, end_datetime,
                         delay_minutes,
@@ -54,6 +58,8 @@ def find_MODIS_files_in_interval(folder_to_search, start_datetime, end_datetime,
         
         filename_list[i] = found_files[0]
     
+    filename_list = [filename for filename in filename_list if filename != '']
+
     return search_strings, filename_list
 
 def collocate_pixels(caliop_long, caliop_lat, modis_long, modis_lat, k_neighbors=1):
@@ -97,25 +103,61 @@ def plot_collocation(CALIOP_filename, collocation_df, found_MODIS_files):
     fig.savefig("./collocation_images/" + CALIOP_filename + ".png", dpi=90)
     plt.close(fig)
 
+def read_JASMIN_CALIOP_file(CALIOP_file):
+# I will attempt to copy the file first because the connection is wonky. If it times out, I move on.
+    def copy_file_to_current_directory(source_path):
+        filename = os.path.basename(source_path)
+        temp_path = os.path.join(tmp.gettempdir(), filename)
+        command = f"cp {os.path.abspath(source_path)} {temp_path}"
+        try:
+            subprocess.run(command.split(' '), timeout=10)
+            # print(f"File '{filename}' copied to a temporary directory.")
+            return temp_path
+        except Exception as e:
+            print(f"Error: {e}")
+            return -1
+    
+    temp_path = copy_file_to_current_directory(CALIOP_file)
+
+    if temp_path == -1:
+        return "corrupted"
+    
+    CALIOP_file = temp_path
+
+    reader = Caliop_hdf_reader()
+    caliop_df = pd.DataFrame(columns=["long", "lat", "time", "profile_id"])
+
+    try:
+        caliop_df.long = reader._get_longitude(CALIOP_file)
+        caliop_df.lat = reader._get_latitude(CALIOP_file)
+        caliop_df.time = reader._get_profile_UTC(CALIOP_file)
+        caliop_df.profile_id = reader._get_profile_id(CALIOP_file)
+        caliop_df = caliop_df.set_index('profile_id')
+    except:
+        print("corrupted file, skipping")
+        return "corrupted"
+
+    os.remove(temp_path)
+
+    return caliop_df
+
 def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
                                          MODIS_pre_path="/neodc/modis/data/MYD03/collection61",
                                          delay_minutes=2,
                                          tolerance_minutes=0.5,
                                          save_img=False):
     
-    reader = Caliop_hdf_reader()
-    caliop_df = pd.DataFrame(columns=["long", "lat", "time", "profile_id"])
-    caliop_df.long = reader._get_longitude(CALIPSO_file)
-    caliop_df.lat = reader._get_latitude(CALIPSO_file)
-    caliop_df.time = reader._get_profile_UTC(CALIPSO_file)
-    caliop_df.profile_id = reader._get_profile_id(CALIPSO_file)
-    caliop_df = caliop_df.set_index('profile_id')
+    # use a separate function to read the file, sometimes the connection fails
+    caliop_df = read_JASMIN_CALIOP_file(CALIPSO_file)
+
+    if caliop_df == "corrupted":
+        return "corrupted"
 
     # prepare the coordinates in a GeoDataFrame to use the built in within() function
     track_coords_dict = {"geometry": [Point(long, lat) for long, lat in zip(caliop_df.long, caliop_df.lat)]}
     track_coords_gdf = gpd.GeoDataFrame(track_coords_dict, index=caliop_df.index)
     mask_over_Greenland = track_coords_gdf.within(shape_polygon)
-    
+
     # if no datapoints over Greenland
     if not mask_over_Greenland.any():
         return "nothing over Greenland"
@@ -179,6 +221,7 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
 
     caliop_df[["modis_idx", "MODIS_file"]].to_csv(csv_path, mode='a')
 
+
     if save_img:
         plot_collocation(csv_name[0:-4], caliop_df, stripped_dates)
 
@@ -190,10 +233,25 @@ def main(args):
     MODIS_folder = args.modisfolder
 
     # TODO multithreading implementation? each year/month on a thread?
-    # TODO save logs to disk each iteration so a crash doesnt wipe it all out
 
     # JASMIN folder
     # CALIOP_folder = "/gws/nopw/j04/gbov/data/asdc.larc.nasa.gov/data/CALIPSO/LID_L2_05kmMLay-Standard-V4-51/"
+
+    if not os.path.exists("./collocation_logs"):
+        os.mkdir("./collocation_logs")
+
+    save_logs_each_iteration = False
+
+    logs_save_time = datetime.datetime.now().strftime("%d_%m_%YT%H_%M_%S")
+    collocation_logs_path = "./collocation_logs/collocation_log_" + logs_save_time + ".csv"
+
+    if save_logs_each_iteration:
+        with open(collocation_logs_path, mode="w") as f:
+            f.write(",output\n")
+
+    greenland_geojson = gpd.read_file("Greenland_ALL.geojson")
+    greenland_polygon = greenland_geojson.geometry[1]
+
     for year in years:
         for month in months:
             CALIOP_folder = os.path.join(args.caliopfolder, str(year), f"{month:02d}")
@@ -209,21 +267,38 @@ def main(args):
             # JASMIN folder
             # MODIS_folder = "/neodc/modis/data/MYD35_L2/collection61"
 
-            greenland_geojson = gpd.read_file("Greenland_ALL.geojson")
-            greenland_polygon = greenland_geojson.geometry[1]
-
             for caliop_file_count, CALIOP_file_path in tqdm.tqdm(enumerate(CALIOP_file_list)):
                 collocation_outputs[caliop_file_count] = collocate_CALIOP_with_MODIS_in_shape(os.path.join(CALIOP_folder, CALIOP_file_path),
                                                             greenland_polygon,
                                                             CALIOP_file_path[0:-4] + ".csv",
-                                                            MODIS_pre_path=MODIS_folder, save_img=True)
-    
-    collocation_logs = pd.DataFrame(collocation_outputs, index=CALIOP_file_list, columns=["output"])
+                                                            MODIS_pre_path=MODIS_folder, save_img=False)
 
-    if not os.path.exists("./collocation_logs"):
-        os.mkdir("./collocation_logs")
-    collocation_logs.to_csv("./collocation_logs/collocation_log_" + datetime.datetime.now().strftime("%d_%m_%YT%H_%M_%S") +
-                            ".csv")
+                if save_logs_each_iteration:
+                    with open(collocation_logs_path, mode="a") as f:
+                        f.write(CALIOP_file_path + "," + collocation_outputs[caliop_file_count] + "\n")
+
+    # save collocation logs if they have not been saved every iteration
+    if not save_logs_each_iteration:
+        outputs_df = pd.DataFrame(columns=["caliop_file", "output"])
+        outputs_df.caliop_file = CALIOP_file_list
+        outputs_df.output = collocation_outputs
+        outputs_df.set_index("caliop_file").to_csv(collocation_logs_path)
+
+    # merge collocation files
+    df = merge_collocation_data("./collocation_database")
+    df.to_csv("./collocation_database/merged_collocations.csv", index=False)
+    
+    # save list of corrupted files separately
+    corrupted_file_list = CALIOP_file_list[collocation_outputs == "corrupted"]
+
+    if len(corrupted_file_list) == 0:
+        return
+
+    if isinstance(corrupted_file_list, str):
+        corrupted_file_list = [corrupted_file_list]
+
+    with open("./collocation_logs/corrupted_file_list.csv", 'a') as file:
+        file.writelines([corrupted_file + "\n" for corrupted_file in corrupted_file_list])
 
 def validate_year(value):
     ivalue = int(value)
@@ -240,11 +315,14 @@ def validate_month(value):
         raise argparse.ArgumentTypeError(f"{value} is not a valid month. Must be between 1 and 12 (inclusive).")
 
 if __name__ == "__main__":
+    # default paths in this repo:
+    # "./test_data/CALIOP/"
+    # "./test_data/MODIS/"
     parser = argparse.ArgumentParser(description="Script for collocating CALIOP with MODIS.")
     parser.add_argument("-year", type=validate_year, nargs="+", help="Years", default=[i for i in range(2006, 2024)])
     parser.add_argument("-month", type=validate_month, nargs="+", help="Months", default=[i for i in range(1, 13)])
-    parser.add_argument("-caliopfolder", type=str, help="CALIOP folder", default="./test_data/CALIOP/")
-    parser.add_argument("-modisfolder", type=str, help="MODIS folder", default="./test_data/MODIS/")
+    parser.add_argument("-caliopfolder", type=str, help="CALIOP folder", default="/gws/nopw/j04/gbov/data/asdc.larc.nasa.gov/data/CALIPSO/LID_L2_05kmMLay-Standard-V4-51/")
+    parser.add_argument("-modisfolder", type=str, help="MODIS folder", default="/neodc/modis/data/MYD35_L2/collection61")
 
     args = parser.parse_args()
     main(args)
