@@ -32,14 +32,17 @@ def merge_collocation_data(folder_path):
 
     return pd.concat(dataframes, ignore_index=True)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Script for merging collocation csv files.")
-    parser.add_argument("-path", type=str, nargs=1, help="path to collocation database folder", default="./collocation_database")
-    parser.add_argument("-s", action="store_true")
-
-    args = parser.parse_args()
+def main(args):
     df = merge_collocation_data(args.path)
 
     if args.s:
-        df.to_csv(os.path.join(args.path, "merged_collocations.csv", index=False))
+        df.to_csv(os.path.join(args.path, "merged_collocations.csv"), index=False)
     print(df.head())
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Script for merging collocation csv files.")
+    parser.add_argument("-path", type=str, help="path to collocation database folder", default="./collocation_database")
+    parser.add_argument("-s", action="store_true")
+
+    args = parser.parse_args()
+    main(args)
