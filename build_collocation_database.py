@@ -72,7 +72,8 @@ def collocate_pixels(caliop_long, caliop_lat, modis_long, modis_lat, k_neighbors
     # TODO check if caliop datapoints are enveloped by modis pixels
     distances, indices = modis_kdtree.query(caliop_query_points, k=k_neighbors)
 
-    return distances, indices, modis_long[indices], modis_lat[indices]
+    # convert distances from degrees to radians before returning
+    return np.pi * distances / 180, indices, modis_long[indices], modis_lat[indices]
 
 def plot_collocation(CALIOP_filename, collocation_df, found_MODIS_files):
     MODIS_filenames = collocation_df.MODIS_file.unique()
@@ -105,24 +106,24 @@ def plot_collocation(CALIOP_filename, collocation_df, found_MODIS_files):
 
 def read_JASMIN_CALIOP_file(CALIOP_file):
 # I will attempt to copy the file first because the connection is wonky. If it times out, I move on.
-    def copy_file_to_current_directory(source_path):
-        filename = os.path.basename(source_path)
-        temp_path = os.path.join(tmp.gettempdir(), filename)
-        command = f"cp {os.path.abspath(source_path)} {temp_path}"
-        try:
-            subprocess.run(command.split(' '), timeout=10)
-            # print(f"File '{filename}' copied to a temporary directory.")
-            return temp_path
-        except Exception as e:
-            print(f"Error: {e}")
-            return -1
+    # def copy_file_to_current_directory(source_path):
+    #     filename = os.path.basename(source_path)
+    #     temp_path = os.path.join(tmp.gettempdir(), filename)
+    #     command = f"cp {os.path.abspath(source_path)} {temp_path}"
+    #     try:
+    #         subprocess.run(command.split(' '), timeout=10)
+    #         # print(f"File '{filename}' copied to a temporary directory.")
+    #         return temp_path
+    #     except Exception as e:
+    #         print(f"Error: {e}")
+    #         return -1
     
-    temp_path = copy_file_to_current_directory(CALIOP_file)
+    # temp_path = copy_file_to_current_directory(CALIOP_file)
 
-    if temp_path == -1:
-        return "corrupted"
+    # if temp_path == -1:
+    #     return "corrupted"
     
-    CALIOP_file = temp_path
+    # CALIOP_file = temp_path
 
     reader = Caliop_hdf_reader()
     caliop_df = pd.DataFrame(columns=["long", "lat", "time", "profile_id"])
@@ -133,11 +134,11 @@ def read_JASMIN_CALIOP_file(CALIOP_file):
         caliop_df.time = reader._get_profile_UTC(CALIOP_file)
         caliop_df.profile_id = reader._get_profile_id(CALIOP_file)
         caliop_df = caliop_df.set_index('profile_id')
-    except:
+    except HDF4Error:
         print("corrupted file, skipping")
         return "corrupted"
 
-    os.remove(temp_path)
+    # os.remove(CALIOP_file)
 
     return caliop_df
 
@@ -150,7 +151,7 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     # use a separate function to read the file, sometimes the connection fails
     caliop_df = read_JASMIN_CALIOP_file(CALIPSO_file)
 
-    if caliop_df == "corrupted":
+    if type(caliop_df) == str:
         return "corrupted"
 
     # prepare the coordinates in a GeoDataFrame to use the built in within() function
@@ -172,7 +173,8 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     # TODO deal with the case in which the start and end times are not within the same day
     # TODO this is specific to the CEDA archive on JASMIN, move to a function?
     MODIS_path = os.path.join(MODIS_pre_path, start_datetime.strftime("%Y"),\
-                              start_datetime.strftime("%m"), start_datetime.strftime("%d"))
+                              start_datetime.strftime("%m"), start_datetime.strftime("%d")
+                              )
     
     stripped_dates, found_MODIS_files = find_MODIS_files_in_interval(MODIS_path, caliop_df.time.iloc[0], caliop_df.time.iloc[-1],
                           delay_minutes,
@@ -200,13 +202,14 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     # TODO deal with the case of missing MODIS files by calculating the average discrepancy between modis and caliop coords
     distances, caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
         collocate_pixels(caliop_df.long, caliop_df.lat, modis_long, modis_lat)
-    
-    valid_collocations = distances < 1.1 * 5 * 1.4142 / 6371
 
     caliop_df["MODIS_file"] = np.where(caliop_df.modis_idx < number_of_pixels_in_first_file, 0, 1)
     caliop_df.modis_idx = np.where(caliop_df.modis_idx < number_of_pixels_in_first_file,\
                                    caliop_df.modis_idx, caliop_df.modis_idx - number_of_pixels_in_first_file)
-    
+
+    # keep only vald profiles
+    caliop_df = caliop_df[distances < 1.1 * 5 * 1.4142 / 6371]
+
     collocation_path = os.path.join("./collocation_database",
                         start_datetime.strftime("%Y"), start_datetime.strftime("%m"))
     
@@ -231,8 +234,6 @@ def main(args):
     years = list(args.year)
     months = list(args.month)
     MODIS_folder = args.modisfolder
-
-    # TODO multithreading implementation? each year/month on a thread?
 
     # JASMIN folder
     # CALIOP_folder = "/gws/nopw/j04/gbov/data/asdc.larc.nasa.gov/data/CALIPSO/LID_L2_05kmMLay-Standard-V4-51/"
@@ -286,7 +287,7 @@ def main(args):
 
     # merge collocation files
     df = merge_collocation_data("./collocation_database")
-    df.to_csv("./collocation_database/merged_collocations.csv", index=False)
+    df.to_csv("./collocation_database/merged_collocations.csv", mode='w', index=False)
     
     # save list of corrupted files separately
     corrupted_file_list = CALIOP_file_list[collocation_outputs == "corrupted"]
@@ -297,7 +298,7 @@ def main(args):
     if isinstance(corrupted_file_list, str):
         corrupted_file_list = [corrupted_file_list]
 
-    with open("./collocation_logs/corrupted_file_list.csv", 'a') as file:
+    with open("./collocation_logs/corrupted_file_list.csv", 'w') as file:
         file.writelines([corrupted_file + "\n" for corrupted_file in corrupted_file_list])
 
 def validate_year(value):
