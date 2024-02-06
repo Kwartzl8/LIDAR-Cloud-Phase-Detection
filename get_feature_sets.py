@@ -186,19 +186,125 @@ def get_modis_geo_data(filepath):
     pixel_id = pd.Series(np.arange(np.size(latitude)), name="pixel_id")
 
     # save the data into a dataframe, with the band names as column names, and the rows as the masked values in data
-    df = pd.DataFrame(np.array([longitude.flatten(), latitude.flatten(), view_zenith_angle.flatten(), solar_zenith_angle.flatten()]).transpose(), columns=["long", "lat", "VZA", "SZA"], index=pixel_id)
+    df = pd.DataFrame(np.array([longitude.flatten(), latitude.flatten(), view_zenith_angle.flatten(), solar_zenith_angle.flatten()]).transpose(), columns=["mLong", "mLat", "mVZA", "mSZA"], index=pixel_id)
 
     return df
 
+# downsampling function that takes an array and downsamples it to a given pixel size by taking the average of the subpixels, while ignoring the masked values
+def downsample_masked_array_by_mean(input_masked_array, pixelXsize=5, pixelYsize=5):
+    rows, cols = input_masked_array.shape
+
+    # reduce array to reshapeable size
+    rows, cols = rows//pixelXsize * pixelXsize, cols//pixelYsize * pixelYsize
+    input_masked_array = input_masked_array[:rows, :cols]
+
+    # the dimensions of the output array
+    rows, cols = rows//pixelXsize, cols//pixelYsize
+    
+    # reshape to 3d array where each axb pixel contains an array of a*b subpixels
+    reshaped_array = np.ma.reshape(input_masked_array, (rows, pixelXsize, cols, pixelYsize)).transpose((0, 2, 1, 3)).reshape(rows, cols, pixelXsize*pixelYsize)
+
+    # take mean while ignoring masked values
+    output_array = np.ma.mean(reshaped_array, axis=2)
+    
+    return output_array
+
+def get_modis_surface_temperature(filepath):
+    # check whether the file exists
+    if not os.path.exists(filepath):
+        print("The given MODIS file does not exist.")
+        return 
+    # try to open the file
+    try:
+        reader = SD(filepath)
+    except HDF4Error:
+        print("The given MODIS file could not be opened.")
+        return
+    
+    # get the land surface temperature (LST)
+    surface_temp = reader.select("LST").get()
+
+    # get valid range for surface temperature from hdf file
+    valid_range = reader.select("LST").attributes().get("valid_range")
+
+    # replace surface temperature with a masked array where values are not in range
+    surface_temp = np.ma.masked_where((surface_temp < valid_range[0]) | (surface_temp > valid_range[1]), surface_temp)
+
+    # get scale factor
+    scale_factor = reader.select("LST").attributes().get("scale_factor")
+
+    # apply scale factor
+    surface_temp = surface_temp * scale_factor
+    
+    # downsample to 5km resolution
+    surface_temp_downsampled = downsample_masked_array_by_mean(surface_temp, 5, 5)
+
+    pixel_id = pd.Series(np.arange(surface_temp_downsampled.shape[0] * surface_temp_downsampled.shape[1]), name="pixel_id")
+
+    df = pd.DataFrame(surface_temp_downsampled.flatten(), columns=["surface_temp"], index=pixel_id)
+    return df
+
+def get_snow_ice_cover_classification(L3_land_cover_folder, longitudes, latitudes, year_list):
+    # check whether L3_land_cover_folder exists
+    if not os.path.exists(L3_land_cover_folder):
+        print("The given L3 land cover folder does not exist.")
+        return
+
+    # check whether year_list is a scalar and if it is, put it into a list the size of lats and longs
+    if np.isscalar(year_list):
+        year_list = np.full(np.shape(longitudes), year_list)
+
+    snow_ice_cover = np.full(np.shape(longitudes), -1)
+    unique_year_list = np.unique(year_list)
+
+    for year in unique_year_list:
+        # get the file path
+        search_string = f"**/MCD12C1.A{year}*"
+        file_path = glob.glob(search_string, root_dir=L3_land_cover_folder, recursive=True)
+
+        # check if the file exists
+        if len(file_path) == 0:
+            print(f"File for year {year} not found.")
+            continue
+        
+        # check if there are multiple files for the same year
+        if len(file_path) > 1:
+            print(f"Multiple files for year {year} found.")
+            continue
+        
+
+        # complete filepath
+        file_path = os.path.join(L3_land_cover_folder, file_path[0])
+        print(file_path)
+
+        # open the file
+        reader = SD(file_path)
+
+        # get the IGBP majority land cover type
+        majority_land_cover_type = reader.select("Majority_Land_Cover_Type_1").get()
+
+        # round down the longitudes and latitudes in the current year to the nearest 0.05 and convert to integers by multiplying by 20
+        longitudes_rounded = np.floor(longitudes[(year_list == year)] / 0.05) + 3600
+        latitudes_rounded = - np.floor(latitudes[(year_list == year)] / 0.05) + 1800
+
+        # get a true or false value for snow/ice cover at the rounded longitudes and latitudes
+        yearly_snow_ice_cover = majority_land_cover_type[latitudes_rounded.astype(int), longitudes_rounded.astype(int)] == 15
+
+        # add the yearly snow/ice cover to the total snow/ice cover
+        snow_ice_cover[year_list == year] = yearly_snow_ice_cover.astype(int)
+
+    return snow_ice_cover
+
 def get_feature_sets(feature_set, data_folder, collocation_data_path):
     # define available functions and corresponding variables (TODO store in a text file)
-    existing_feature_sets = ["modis_infrared_cloud_phase", "modis_optical_cloud_phase", "modis_radiances", "modis_geo", "caliop_cloud_phase"]
+    existing_feature_sets = ["modis_infrared_cloud_phase", "modis_optical_cloud_phase", "modis_radiances", "modis_geo", "modis_surface_temp", "caliop_cloud_phase"]
 
     feature_set_extractor_func_dict = dict(zip(existing_feature_sets,\
-                                    [get_modis_5km_cloud_phase, get_modis_5km_optical_cloud_phase, get_modis_l1_data, get_modis_geo_data, get_caliop_cloud_phase]))
-    product_name_dict = dict(zip(existing_feature_sets, ["MYD06", "MYD06", "MYD02SSH", "MYD06", "CAL_LID_L2_05kmMLay-Standard-V4-51"]))
-    fileID_keys_dict = dict(zip(existing_feature_sets, ["mFileID", "mFileID", "mFileID", "mFileID", "cFileID"]))
-    profileID_keys_dict = dict(zip(existing_feature_sets, ["pixel_id", "pixel_id", "pixel_id", "pixel_id", "profile_id"]))
+        [get_modis_5km_cloud_phase, get_modis_5km_optical_cloud_phase, get_modis_l1_data,\
+         get_modis_geo_data, get_modis_surface_temperature, get_caliop_cloud_phase]))
+    product_name_dict = dict(zip(existing_feature_sets, ["MYD06", "MYD06", "MYD02SSH", "MYD06", "MYD11", "CAL_LID_L2_05kmMLay-Standard-V4-51"]))
+    fileID_keys_dict = dict(zip(existing_feature_sets, ["mFileID", "mFileID", "mFileID", "mFileID", "mFileID", "cFileID"]))
+    profileID_keys_dict = dict(zip(existing_feature_sets, ["pixel_id", "pixel_id", "pixel_id", "pixel_id", "pixel_id", "profile_id"]))
 
     # parameter validation
     if feature_set not in existing_feature_sets:
