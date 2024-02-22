@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import pandas as pd
 import argparse
+import tqdm
 
 def merge_collocation_data(folder_path):
     if not os.path.isdir(folder_path):
@@ -16,7 +17,7 @@ def merge_collocation_data(folder_path):
 
     dataframes = []
 
-    for file in collocation_files:
+    for file in tqdm.tqdm(collocation_files):
         file_path = os.path.join(folder_path, file)
         with open(file_path) as f:
             start_and_end_times = f.readline()
@@ -35,14 +36,20 @@ def merge_collocation_data(folder_path):
 def main(args):
     df = merge_collocation_data(args.path)
 
-    if args.s:
-        df.to_csv(os.path.join(args.path, "merged_collocations.csv"), index=False)
-    print(df.head())
+    # check if the output path is provided
+    if args.o is None:
+        filename = "merged_collocations"
+        # add the names of the last 2 folders to the filename separated by underscores
+        filename += "_".join(args.path.split("/")[-2:]) + ".csv"
+        
+        args.o = os.path.join(args.path, filename)
+    
+    df.to_csv(args.o, index=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Script for merging collocation csv files.")
     parser.add_argument("-path", type=str, help="path to collocation database folder", default="./collocation_database")
-    parser.add_argument("-s", action="store_true")
+    parser.add_argument("-o", type=str, help="output file path", required=False)
 
     args = parser.parse_args()
     main(args)
