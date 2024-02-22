@@ -31,10 +31,11 @@ def main(args):
     # get the modis_radiances, modis_geo (send in the pathname for snow_ice_classification to the optional argument), modis_cloud_top_properties and merge them together in a single dataframe
 
     modis_training_features_list = []
-
+    print("Getting modis radiances")
     modis_training_features_list.append(get_feature_sets("modis_radiances", data_paths["modis_radiances"], args.colpath))
-    # print("modis_radiances done")
+    print("Getting modis geo")
     modis_training_features_list.append(get_feature_sets("modis_geo", data_paths["modis_geo"], args.colpath, kwargs={"surface_datapath": data_paths["snow_ice_classification"]}))
+    print("Getting modis cloud top properties")
     modis_training_features_list.append(get_feature_sets("modis_cloud_top_properties", data_paths["modis_cloud_top_properties"], args.colpath))
 
 
@@ -54,11 +55,13 @@ def main(args):
     modis_training_features.reset_index().to_csv(os.path.join(os.path.dirname(args.colpath), modis_training_features_filename), index=False)
 
     # now get the caliop cloud phase and save it in a csv
+    print("Getting caliop cloud phase")
     caliop_cloud_phase = get_feature_sets("caliop_cloud_phase", data_paths["caliop_cloud_phase"], args.colpath)
     caliop_cloud_phase_filename = "caliop_labels" + year_month_suffix + ".csv"
     caliop_cloud_phase.replace({True: 1, False: 0}).reset_index().to_csv(os.path.join(os.path.dirname(args.colpath), caliop_cloud_phase_filename), index=False)
 
     # get the ir modis cloud phase and save it in a csv
+    print("Getting modis infrared cloud phase")
     modis_infrared_cloud_phase = get_feature_sets("modis_infrared_cloud_phase", data_paths["modis_infrared_cloud_phase"], args.colpath)
     # get rid of rows with duplicate indices
     modis_infrared_cloud_phase = modis_infrared_cloud_phase[~modis_infrared_cloud_phase.index.duplicated(keep='first')]
@@ -66,6 +69,7 @@ def main(args):
     modis_infrared_cloud_phase.replace({True: 1, False: 0}).reset_index().to_csv(os.path.join(os.path.dirname(args.colpath), modis_infrared_cloud_phase_filename), index=False)
 
     # get the optical modis cloud phase and save it in a csv
+    print("Getting modis optical cloud phase")
     modis_optical_cloud_phase = get_feature_sets("modis_optical_cloud_phase", data_paths["modis_optical_cloud_phase"], args.colpath)
     # get rid of rows with duplicate indices
     modis_optical_cloud_phase = modis_optical_cloud_phase[~modis_optical_cloud_phase.index.duplicated(keep='first')]
