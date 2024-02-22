@@ -50,7 +50,9 @@ def find_MODIS_files_in_interval(folder_to_search, start_datetime, end_datetime,
         search_strings[i] = "A" + str(modis_start_time.year) + str(day_of_year).zfill(3) + "." +\
                             str(modis_start_time.hour).zfill(2) + str(modis_start_time.minute).zfill(2)
         
-        found_files = glob.glob("**/*" + search_strings[i] + "*.hdf", root_dir=folder_to_search, recursive=True)
+        # get the year and month of the modis file to add to the search strings
+        year_month = str(modis_start_time.year) + '/' + str(modis_start_time.month).zfill(2)
+        found_files = glob.glob(f"{year_month}/**/*" + search_strings[i] + "*.hdf", root_dir=folder_to_search, recursive=True)
 
         if len(found_files) > 1:
             # something went terribly wrong
@@ -179,9 +181,9 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     MODIS_path = MODIS_pre_path
 
     # this is specific to the CEDA archive on JASMIN, move to a function? I solved this by using glob on the folder, but it's slow
-    MODIS_path = os.path.join(MODIS_pre_path, start_datetime.strftime("%Y"),\
-                              start_datetime.strftime("%m"), start_datetime.strftime("%d")
-                              )
+    # MODIS_path = os.path.join(MODIS_pre_path, start_datetime.strftime("%Y"),\
+    #                           start_datetime.strftime("%m"), start_datetime.strftime("%d")
+    #                           )
     
     stripped_dates, found_MODIS_files = find_MODIS_files_in_interval(MODIS_path, caliop_df.time.iloc[0], caliop_df.time.iloc[-1],
                           delay_minutes,
@@ -203,7 +205,7 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
         MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[i]))
         modis_long = np.concatenate([modis_long, MODIS_reader.select("Longitude").get()], axis=0)
         modis_lat = np.concatenate([modis_lat, MODIS_reader.select("Latitude").get()], axis=0)
-        end_pixel_id_in_file.append(np.size(modis_long) + end_pixel_id_in_file[-1])
+        end_pixel_id_in_file.append(np.size(modis_long))
 
     distances, caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
         collocate_pixels(caliop_df.long, caliop_df.lat, modis_long, modis_lat)
@@ -256,8 +258,7 @@ def main(args):
     # JASMIN folder
     # CALIOP_folder = "/gws/nopw/j04/gbov/data/asdc.larc.nasa.gov/data/CALIPSO/LID_L2_05kmMLay-Standard-V4-51/"
 
-    if not os.path.exists("./collocation_logs"):
-        os.mkdir("./collocation_logs")
+    os.makedirs("./collocation_logs", exist_ok=True)
 
     save_logs_each_iteration = False
 
@@ -296,16 +297,16 @@ def main(args):
                     with open(collocation_logs_path, mode="a") as f:
                         f.write(CALIOP_file_path + "," + collocation_outputs[caliop_file_count] + "\n")
 
+            # merge the collocation files of this month
+            df = merge_collocation_data(f"./collocation_database/{year}/{month:02d}")
+            df.to_csv(f"./collocation_database/{year}/{month:02d}/merged_collocations{year}_{month:02d}.csv", mode='w', index=False)
+
     # save collocation logs if they have not been saved every iteration
     if not save_logs_each_iteration:
         outputs_df = pd.DataFrame(columns=["caliop_file", "output"])
         outputs_df.caliop_file = CALIOP_file_list
         outputs_df.output = collocation_outputs
         outputs_df.set_index("caliop_file").to_csv(collocation_logs_path)
-
-    # merge collocation files (not for batch jobs! it overwrites the file every time)
-    # df = merge_collocation_data("./collocation_database")
-    # df.to_csv("./collocation_database/merged_collocations.csv", mode='w', index=False)
     
     # save list of corrupted files separately
     corrupted_file_list = CALIOP_file_list[collocation_outputs == "corrupted"]
