@@ -34,20 +34,20 @@ def get_caliop_cloud_phase(caliop_filepath, **kwargs):
 
     cloud_phase_layer, cloud_phase_layer_qa = reader_caliop._get_cloud_phase(caliop_filepath, "Feature_Classification_Flags")
 
-    caliop_df["cWater"] = np.where(np.any(cloud_phase_layer == 2 & CAD_score > 70, axis=0) &\
-                                        ~np.any(cloud_phase_layer == 1 & CAD_score > 70, axis=0) &\
-                                        ~np.any(cloud_phase_layer == 3 & CAD_score > 70, axis=0), True, False)
-    caliop_df["cIce"] = np.where((np.any(cloud_phase_layer == 1 & CAD_score > 70, axis=0) |\
-                                        np.any(cloud_phase_layer == 3 & CAD_score > 70, axis=0)) &\
-                                        ~np.any(cloud_phase_layer == 2 & CAD_score > 70, axis=0), True, False)
-    caliop_df["cMixedMultilayer"] = np.where((np.any(cloud_phase_layer == 1 & CAD_score > 70, axis=0) |\
-                                        np.any(cloud_phase_layer == 3 & CAD_score > 70, axis=0)) &\
-                                        np.any(cloud_phase_layer == 2 & CAD_score > 70, axis=0), True, False)
+    caliop_df["cWater"] = np.where(np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0) &\
+                                        ~np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) &\
+                                        ~np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0), True, False)
+    caliop_df["cIce"] = np.where((np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) |\
+                                        np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0)) &\
+                                        ~np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0), True, False)
+    caliop_df["cMixedMultilayer"] = np.where((np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) |\
+                                        np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0)) &\
+                                        np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0), True, False)
     caliop_df["cUnknown"] = np.where(caliop_df["cCloudy"] &\
                                         np.any(cloud_phase_layer == 0, axis=0) &\
-                                        ~np.any(cloud_phase_layer == 1 & CAD_score > 70, axis=0) &\
-                                        ~np.any(cloud_phase_layer == 2 & CAD_score > 70, axis=0) &\
-                                        ~np.any(cloud_phase_layer == 3 & CAD_score > 70, axis=0), True, False)
+                                        ~np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) &\
+                                        ~np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0) &\
+                                        ~np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0), True, False)
 
     caliop_df["cPhaseHighQA"] = np.where(np.any(cloud_phase_layer_qa == 3, axis=0), True, False)
 
