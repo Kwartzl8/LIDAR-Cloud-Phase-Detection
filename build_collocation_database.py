@@ -11,6 +11,7 @@ import geopandas as gpd
 import cartopy.crs as ccrs
 import cartopy.io.shapereader as shpreader
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import numpy as np
 from sklearn.neighbors import KDTree
 import tqdm
@@ -18,8 +19,11 @@ import argparse
 import subprocess
 import tempfile as tmp
 import warnings
+import seaborn as sns
 
 from merge_collocations import merge_collocation_data
+
+filter_ice_surface = True
 
 def find_MODIS_files_in_interval(folder_to_search, start_datetime, end_datetime,
                         delay_minutes,
@@ -82,34 +86,75 @@ def collocate_pixels(caliop_long, caliop_lat, modis_long, modis_lat, k_neighbors
     # convert distances from degrees to radians before returning
     return np.pi * distances / 180, indices, modis_long[indices], modis_lat[indices]
 
-def plot_collocation(CALIOP_filename, collocation_df, found_MODIS_files):
+def plot_collocation(CALIOP_filename, collocation_df, corner_coords, found_MODIS_files):
+    plt.rcParams['text.usetex'] = True
+    plt.rcParams['font.size'] = 9
+    plt.rcParams['font.family'] = 'serif'
+    plt.rcParams['font.serif'] = 'Computer Modern'
+    plt.rcParams['text.latex.preamble'] = r'\usepackage{amsmath}'
     MODIS_filenames = collocation_df.MODIS_file.unique()
-    number_of_found_MODIS_files = len(MODIS_filenames)
-
+    
     caliop_central_long = (collocation_df.long.max() + collocation_df.long.min())/2
     caliop_central_lat = (collocation_df.lat.max() + collocation_df.lat.min())/2
-    ccrs_projection = ccrs.Orthographic(central_longitude=caliop_central_long, central_latitude=caliop_central_lat)
-    fig, ax = plt.subplots(figsize=(8,8), subplot_kw={'projection': ccrs_projection})
-    ax.set_extent([collocation_df.long.min(), collocation_df.long.max(), collocation_df.lat.min(), collocation_df.lat.max()], ccrs.PlateCarree())
-    ax.coastlines(resolution='10m', color='black', linewidth=1)
 
-    colors = ["darkblue", "orange", "green"]
+    # subsample the collocated pixels, too many are plotted
+    collocation_df = collocation_df.iloc[::10, :]
+
+    ccrs_projection = ccrs.NorthPolarStereo()
+    # ccrs_projection = ccrs.Orthographic(central_longitude=caliop_central_long, central_latitude=caliop_central_lat)
+    ccrs_projection._threshold = ccrs_projection._threshold/1.0
+
+    # sns_palette = sns.color_palette("crest", n_colors=10)
+
+    color_list = ["lightsalmon", '#1f77b4']
+
+    fig, ax = plt.subplots(figsize=(4.2,4.2), subplot_kw={'projection': ccrs_projection})
+    # ax.set_extent([collocation_df.long.min(), collocation_df.long.max(), collocation_df.lat.min(), collocation_df.lat.max()], ccrs.PlateCarree())
+    ax.coastlines(resolution='50m', color='black', linewidth=1)
+    ax.set_extent([-85, 0, 64, 85], ccrs.PlateCarree())
+    ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=False, linestyle="dashed", zorder=0)
+    ax.plot(collocation_df.long, collocation_df.lat, label="CALIOP track",
+            c="r", linewidth=1.5, #alpha=0.8,
+            # zorder=1,
+            transform=ccrs.PlateCarree())
 
     for index, modis_filename in enumerate(MODIS_filenames):
-        color = colors[index]
         ax.scatter(collocation_df.modis_long[collocation_df.MODIS_file == modis_filename],
                    collocation_df.modis_lat[collocation_df.MODIS_file == modis_filename],
-                   label=found_MODIS_files[modis_filename], transform=ccrs.PlateCarree(), c=color)
+                   marker='D',
+                   edgecolors="k",
+                   linewidths=0.5,
+                   s=30,
+                   c=color_list[index],
+                #    zorder=0,
+                   label=found_MODIS_files[modis_filename], transform=ccrs.PlateCarree())
+        
+        corner_coords[index] = np.array(corner_coords[index]).T
+        poly = mpatches.Polygon([(corner[0], corner[1]) for corner in corner_coords[index]],
+                                closed=True, fill=True, fc=ax.collections[index].get_facecolor()[0], alpha=0.3,
+                                transform=ccrs.PlateCarree())
+
+        # fill with alpha=0.5 the space between the corners of the MODIS image with the color used for the scatter plot
+        # ax.fill([corner[0] for corner in corner_coords[index]],
+        #         [corner[1] for corner in corner_coords[index]],
+        #         color=ax.collections[index].get_facecolor()[0], alpha=0.5,
+        #         #transform=ccrs.PlateCarree()
+        #         )
+
+        ax.add_patch(poly)
+
+        # mark the corners of the MODIS image with stars
+        # ax.scatter([corner[0] for corner in corner_coords[index]],
+        #              [corner[1] for corner in corner_coords[index]], marker='*', c='r', transform=ccrs.PlateCarree())
     
-    ax.plot(collocation_df.long, collocation_df.lat, label="caliop track", c="r", transform=ccrs.PlateCarree())
-    ax.set_title(CALIOP_filename)
-    ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linestyle="dashed")
-    ax.legend()
+    ax.set_title("Collocation, 6AM UTC, 07/02/2017", fontsize=11)
+    # ax.gridlines(crs=ccrs.PlateCarree(), draw_labels=True, linestyle="dashed")
+    ax.legend(loc='lower right', framealpha=0.95)
 
     if not os.path.exists("./collocation_images/"):
         os.mkdir("./collocation_images/")
     
-    fig.savefig("./collocation_images/" + CALIOP_filename + ".png", dpi=90)
+    fig.savefig("./collocation_images/" + CALIOP_filename + ".pdf", dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 def read_JASMIN_CALIOP_file(CALIOP_file):
@@ -137,6 +182,9 @@ def read_JASMIN_CALIOP_file(CALIOP_file):
     caliop_df = pd.DataFrame(columns=["long", "lat", "time", "profile_id"])
 
     try:
+        caliop_df["cIceSurface"] = (reader._get_calipso_data(CALIOP_file, "IGBP_Surface_Type") == 15)[0, :]
+        if caliop_df["cIceSurface"].sum() == 0:
+            return "no ice surface found"
         caliop_df.long = reader._get_longitude(CALIOP_file)
         caliop_df.lat = reader._get_latitude(CALIOP_file)
         caliop_df.time = reader._get_profile_UTC(CALIOP_file)
@@ -147,6 +195,9 @@ def read_JASMIN_CALIOP_file(CALIOP_file):
         return "corrupted"
 
     # os.remove(CALIOP_file)
+
+    if filter_ice_surface:
+        caliop_df = caliop_df[caliop_df.cIceSurface]
 
     return caliop_df
 
@@ -160,23 +211,18 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     caliop_df = read_JASMIN_CALIOP_file(CALIPSO_file)
 
     if type(caliop_df) == str:
-        return "corrupted"
+        return caliop_df
 
-    # prepare the coordinates in a GeoDataFrame to use the built in within() function
-    track_coords_dict = {"geometry": [Point(long, lat) for long, lat in zip(caliop_df.long, caliop_df.lat)]}
-    track_coords_gdf = gpd.GeoDataFrame(track_coords_dict, index=caliop_df.index)
-    mask_over_Greenland = track_coords_gdf.within(shape_polygon)
+    # # prepare the coordinates in a GeoDataFrame to use the built in within() function
+    # track_coords_dict = {"geometry": [Point(long, lat) for long, lat in zip(caliop_df.long, caliop_df.lat)]}
+    # track_coords_gdf = gpd.GeoDataFrame(track_coords_dict, index=caliop_df.index)
+    # mask_over_Greenland = track_coords_gdf.within(shape_polygon)
 
-    # if no datapoints over Greenland
-    if not mask_over_Greenland.any():
-        return "nothing over Greenland"
+    # # if no datapoints over Greenland
+    # if not mask_over_Greenland.any():
+    #     return "nothing in shape"
 
-    start_datetime = caliop_df.time[mask_over_Greenland].iloc[0]\
-        + datetime.timedelta(minutes = - delay_minutes - tolerance_minutes) 
-    end_datetime = caliop_df.time[mask_over_Greenland].iloc[-1]\
-        + datetime.timedelta(minutes = - delay_minutes + tolerance_minutes)
-
-    caliop_df = caliop_df.loc[mask_over_Greenland, :]
+    # caliop_df = caliop_df.loc[mask_over_Greenland, :]
 
     MODIS_path = MODIS_pre_path
 
@@ -194,17 +240,33 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
         return "no MODIS files found in time interval"
 
     # given that I checked there is at least one file, read it
-    MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[0]))
+    try:
+        MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[0]))
+    except HDF4Error:
+        return "corrupted"
+
     modis_long = MODIS_reader.select("Longitude").get()
     modis_lat = MODIS_reader.select("Latitude").get()
+    edge_coords = [(
+        np.concatenate([modis_long[0, ::10], modis_long[::10, -1], modis_long[-1, ::-10], modis_long[::-10, 0]]),
+        np.concatenate([modis_lat[0, ::10], modis_lat[::10, -1], modis_lat[-1, ::-10], modis_lat[::-10, 0]])
+    )]
     end_pixel_id_in_file = [0]
     end_pixel_id_in_file.append(np.size(modis_long) + end_pixel_id_in_file[-1])
 
     # now concatenate the rest of the files
     for i in range(1, number_of_found_MODIS_files):
         MODIS_reader = SD(os.path.join(MODIS_path, found_MODIS_files[i]))
-        modis_long = np.concatenate([modis_long, MODIS_reader.select("Longitude").get()], axis=0)
-        modis_lat = np.concatenate([modis_lat, MODIS_reader.select("Latitude").get()], axis=0)
+        current_long = MODIS_reader.select("Longitude").get()
+        current_lat = MODIS_reader.select("Latitude").get()
+
+        edge_coords.append((
+            np.concatenate([current_long[0, ::10], current_long[::10, -1], current_long[-1, ::-10], current_long[::-10, 0]]),
+            np.concatenate([current_lat[0, ::10], current_lat[::10, -1], current_lat[-1, ::-10], current_lat[::-10, 0]])
+        ))
+
+        modis_long = np.concatenate([modis_long, current_long], axis=0)
+        modis_lat = np.concatenate([modis_lat, current_lat], axis=0)
         end_pixel_id_in_file.append(np.size(modis_long))
 
     distances, caliop_df["modis_idx"], caliop_df["modis_long"], caliop_df["modis_lat"] =\
@@ -228,10 +290,10 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
     # return Nothing found over Greenland if there are less than 10 valid profiles remaining
     if len(caliop_df) < 10:
         # print(f"Less than 10 valid profiles found over Greenland in {CALIPSO_file}.")
-        return "nothing found over Greenland"
+        return "nothing found in shape"
 
     collocation_path = os.path.join("./collocation_database",
-                        start_datetime.strftime("%Y"), start_datetime.strftime("%m"))
+                        caliop_df.time.iloc[0].strftime("%Y"), caliop_df.time.iloc[0].strftime("%m"))
     
     os.makedirs(collocation_path, exist_ok=True)
     csv_path = os.path.join(collocation_path, csv_name)
@@ -246,7 +308,7 @@ def collocate_CALIOP_with_MODIS_in_shape(CALIPSO_file, shape_polygon, csv_name,
 
 
     if save_img:
-        plot_collocation(csv_name[0:-4], caliop_df, stripped_dates)
+        plot_collocation(csv_name[0:-4], caliop_df, edge_coords, stripped_dates)
 
     return "ok"
 
@@ -269,8 +331,8 @@ def main(args):
         with open(collocation_logs_path, mode="w") as f:
             f.write(",output\n")
 
-    greenland_geojson = gpd.read_file("Greenland_ALL.geojson")
-    greenland_polygon = greenland_geojson.geometry[1]
+    geojson = gpd.read_file("Antarctica.geojson")
+    polygon = geojson.geometry[0]
 
     for year in years:
         for month in months:
@@ -289,9 +351,9 @@ def main(args):
 
             for caliop_file_count, CALIOP_file_path in tqdm.tqdm(enumerate(CALIOP_file_list)):
                 collocation_outputs[caliop_file_count] = collocate_CALIOP_with_MODIS_in_shape(os.path.join(CALIOP_folder, CALIOP_file_path),
-                                                            greenland_polygon,
+                                                            polygon,
                                                             CALIOP_file_path[0:-4] + ".csv",
-                                                            MODIS_pre_path=MODIS_folder, save_img=False)
+                                                            MODIS_pre_path=MODIS_folder, save_img=True)
 
                 if save_logs_each_iteration:
                     with open(collocation_logs_path, mode="a") as f:
