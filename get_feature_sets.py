@@ -19,14 +19,15 @@ def get_caliop_cloud_phase(caliop_filepath, **kwargs):
     stratospheric_aerosol_column_AOD = reader_caliop._get_calipso_data(caliop_filepath, "Column_Optical_Depth_Stratospheric_Aerosols_532")
     total_aerosol_column_AOD = tropospheric_aerosol_column_AOD + stratospheric_aerosol_column_AOD
 
-    # get the CAD score
-    CAD_score = reader_caliop._get_calipso_data(caliop_filepath, "CAD_Score")
+    # get the CAD score (remove mask)
+    CAD_score = reader_caliop._get_calipso_data(caliop_filepath, "CAD_Score").data
 
     _, layer_type = reader_caliop._get_feature_classification(caliop_filepath, "Feature_Classification_Flags")
 
-    # if any of the cloudy layers identified have a CAD score outside of the range [20, 100], then the profile is considered cloudy
-    caliop_df["cCloudy"] = np.where(np.all((CAD_score < 20) | (CAD_score > 100), axis=0), False, True)
-    caliop_df["cCloudyHighQA"] = np.where(np.any(CAD_score > 70, axis=0), True, False)
+    integrated_attenuated_backscatter = reader_caliop._get_calipso_data(caliop_filepath, "Integrated_Attenuated_Backscatter_532").data
+    column_cloud_optical_depth = reader_caliop._get_calipso_data(caliop_filepath, "Column_Optical_Depth_Cloud_532").data[0]
+    caliop_df['cColumnOpticalDepth'] = column_cloud_optical_depth
+
     caliop_df["cClear"] = np.where(np.all(layer_type == 1, axis=0), True, False)
     caliop_df["cInvalid"] = np.where(np.any(layer_type == 0, axis=0), True, False)
     caliop_df["cAerosolFree"] = (total_aerosol_column_AOD < 0.05)[0]
@@ -34,22 +35,84 @@ def get_caliop_cloud_phase(caliop_filepath, **kwargs):
 
     cloud_phase_layer, cloud_phase_layer_qa = reader_caliop._get_cloud_phase(caliop_filepath, "Feature_Classification_Flags")
 
-    caliop_df["cWater"] = np.where(np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0) &\
-                                        ~np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) &\
-                                        ~np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0), True, False)
-    caliop_df["cIce"] = np.where((np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) |\
-                                        np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0)) &\
-                                        ~np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0), True, False)
-    caliop_df["cMixedMultilayer"] = np.where((np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) |\
-                                        np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0)) &\
-                                        np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0), True, False)
-    caliop_df["cUnknown"] = np.where(caliop_df["cCloudy"] &\
-                                        np.any(cloud_phase_layer == 0, axis=0) &\
-                                        ~np.any((cloud_phase_layer == 1) & (CAD_score > 70), axis=0) &\
-                                        ~np.any((cloud_phase_layer == 2) & (CAD_score > 70), axis=0) &\
-                                        ~np.any((cloud_phase_layer == 3) & (CAD_score > 70), axis=0), True, False)
+    # fill out high quality features
+    high_quality_cloud_layer_mask = (CAD_score >= 70) & (CAD_score <= 100)
+    caliop_df["cCloudyHighQA"] = np.where(np.any(high_quality_cloud_layer_mask, axis=0), True, False)
+    high_quality_water_cloud_mask = (cloud_phase_layer == 2) & high_quality_cloud_layer_mask & (cloud_phase_layer_qa == 3)
+    high_quality_ice_cloud_mask = (cloud_phase_layer == 1) & high_quality_cloud_layer_mask & (cloud_phase_layer_qa == 3)
+    high_quality_oriented_ice_cloud_mask = (cloud_phase_layer == 3) & high_quality_cloud_layer_mask & (cloud_phase_layer_qa == 3)
 
-    caliop_df["cPhaseHighQA"] = np.where(np.any(cloud_phase_layer_qa == 3, axis=0), True, False)
+    caliop_df["cWaterHighQA"] = np.where(np.any(high_quality_water_cloud_mask, axis=0) &\
+                                    ~np.any(high_quality_ice_cloud_mask, axis=0) &\
+                                    ~np.any(high_quality_oriented_ice_cloud_mask, axis=0), True, False)
+    caliop_df["cIceHighQA"] = np.where((np.any(high_quality_ice_cloud_mask, axis=0) |\
+                                    np.any(high_quality_oriented_ice_cloud_mask, axis=0)) &\
+                                    ~np.any(high_quality_water_cloud_mask, axis=0), True, False)
+    caliop_df["cMixedMultilayerHighQA"] = np.where((np.any(high_quality_ice_cloud_mask, axis=0) |\
+                                    np.any(high_quality_oriented_ice_cloud_mask, axis=0)) &\
+                                    np.any(high_quality_water_cloud_mask, axis=0), True, False)
+    caliop_df["cUnknownHighQA"] = np.where(caliop_df["cCloudyHighQA"] &\
+                                    ~np.any(high_quality_ice_cloud_mask, axis=0) &\
+                                    ~np.any(high_quality_oriented_ice_cloud_mask, axis=0) &\
+                                    ~np.any(high_quality_water_cloud_mask, axis=0), True, False)
+
+    # extract some useful classifications from the MixedMultilayer category, now with a more stringent condition
+    attenuation_ratio = 5
+
+    IAB_ice = integrated_attenuated_backscatter * (high_quality_ice_cloud_mask | high_quality_oriented_ice_cloud_mask)
+    IAB_water = integrated_attenuated_backscatter * high_quality_water_cloud_mask
+
+    caliop_df["cIAB_ice"] = np.sum(IAB_ice, axis=0)
+    caliop_df["cIAB_water"] = np.sum(IAB_water, axis=0)
+
+    # add the mixed ice dominant profiles to the ice category
+    caliop_df["cIceDominant"] = caliop_df["cIceHighQA"] | np.where(
+        caliop_df["cMixedMultilayerHighQA"] &\
+        (caliop_df["cIAB_ice"] >\
+        caliop_df["cIAB_water"] * attenuation_ratio), True, False
+    )
+
+    # add the mixed water dominant profiles to the ice category
+    caliop_df["cWaterDominant"] = caliop_df["cWaterHighQA"] | np.where(
+        caliop_df["cMixedMultilayerHighQA"] &\
+        (caliop_df["cIAB_ice"] <\
+        caliop_df["cIAB_water"] / attenuation_ratio), True, False
+        )
+    
+    # # now these are the truly mixed profiles
+    # caliop_df["cAmbiguous"] = np.where(
+    #     caliop_df["cMixedMultilayerHighQA"] &\
+    #     ((caliop_df["cIAB_ice"] >\
+    #     caliop_df["cIAB_water"] / attenuation_ratio) |\
+    #     (caliop_df["cIAB_ice"] <\
+    #     caliop_df["cIAB_water"] * attenuation_ratio)), True, False
+    # )
+
+    caliop_df["cAmbiguous"] = np.where(
+        caliop_df["cMixedMultilayerHighQA"] &\
+        ~caliop_df["cIceDominant"] &\
+        ~caliop_df["cWaterDominant"], True, False
+    )
+
+    # get the cloud geometrical thickness
+    layer_top_altitude = reader_caliop._get_calipso_data(caliop_filepath, "Layer_Top_Altitude").data
+    layer_base_altitude = reader_caliop._get_calipso_data(caliop_filepath, "Layer_Base_Altitude").data
+    column_ice_cloud_geometrical_thickness = np.sum((layer_top_altitude - layer_base_altitude) *\
+                                                (high_quality_ice_cloud_mask | high_quality_oriented_ice_cloud_mask), axis=0)
+    column_water_cloud_geometrical_thickness = np.sum((layer_top_altitude - layer_base_altitude) * high_quality_water_cloud_mask, axis=0)
+
+    caliop_df['cCloudGeometricalThickness'] = column_ice_cloud_geometrical_thickness * caliop_df['cIceDominant'].astype(int) +\
+          column_water_cloud_geometrical_thickness * caliop_df['cWaterDominant'].astype(int)
+
+    # get cloud top height for each category
+    ice_cloud_top_height = np.max(layer_top_altitude * (high_quality_ice_cloud_mask | high_quality_oriented_ice_cloud_mask), axis=0)
+    water_cloud_top_height = np.max(layer_top_altitude * high_quality_water_cloud_mask, axis=0)
+
+    # combine them
+    caliop_df['cCloudTopHeight'] = ice_cloud_top_height * caliop_df['cIceDominant'].astype(int) +\
+          water_cloud_top_height * caliop_df['cWaterDominant'].astype(int)
+
+
 
     return caliop_df
 
@@ -118,7 +181,7 @@ def get_modis_l1_data(filepath, **kwargs):
     # parameter validation
     if not os.path.exists(filepath):
         print("The given MODIS file does not exist.")
-        return
+        return pd.DataFrame()
     
     # try to open the file
     try:
@@ -127,18 +190,22 @@ def get_modis_l1_data(filepath, **kwargs):
         print("The given MODIS file could not be opened.")
         return
 
-    # check if **kwargs contains the variables_to_extract key. If it does, save the value in variables_to_extract, otherwise, use the default values
-    if "variables_to_extract" in kwargs:
-        variables_to_extract = kwargs["variables_to_extract"]
-    else:
-        variables_to_extract = ["EV_250_Aggr1km_RefSB", "EV_500_Aggr1km_RefSB", "EV_1KM_RefSB", "EV_1KM_Emissive"]
+    # # check if **kwargs contains the variables_to_extract key. If it does, save the value in variables_to_extract, otherwise, use the default values
+    # if "variables_to_extract" in kwargs:
+    #     variables_to_extract = kwargs["variables_to_extract"]
+    # else:
+    variables_to_extract = ["EV_250_Aggr1km_RefSB", "EV_500_Aggr1km_RefSB", "EV_1KM_RefSB", "EV_1KM_Emissive"]
 
     data = [0] * len(variables_to_extract)
     data_masks = [0] * len(variables_to_extract)
     band_names = []
     for index, variable in enumerate(variables_to_extract):
-        extracted_data = reader.select(variable).get()
-        
+        try:
+            extracted_data = reader.select(variable).get()
+        except HDF4Error:
+            print(f"The variable {variable} could not be found in the {os.path.basename(filepath)} file.")
+            return pd.DataFrame()
+
         # subsample every 5th pixel in the x and y direction and get rid of the last column
         extracted_data = extracted_data[:, 2::5, 2::5][:, :, :-1]
 
@@ -225,7 +292,11 @@ def get_snow_ice_cover_classification(L3_land_cover_folder, longitudes, latitude
 
         # round down the longitudes and latitudes in the current year to the nearest 0.05 and convert to integers by multiplying by 20
         longitudes_rounded = np.floor(longitudes[(year_list == year)] / 0.05) + 3600
-        latitudes_rounded = - np.floor(latitudes[(year_list == year)] / 0.05) + 1800
+        latitudes_rounded = - np.floor(latitudes[(year_list == year)] / 0.05) + 1800 - 1
+
+        # if any values are -1, replace them with 0
+        longitudes_rounded[longitudes_rounded == 7200] = 7199
+        latitudes_rounded[latitudes_rounded == -1] = 0
 
         # get a true or false value for snow/ice cover at the rounded longitudes and latitudes
         yearly_snow_ice_cover = majority_land_cover_type[latitudes_rounded.astype(int), longitudes_rounded.astype(int)] == 15
@@ -241,6 +312,198 @@ def get_snow_ice_cover_classification(L3_land_cover_folder, longitudes, latitude
 
     return snow_ice_cover
 
+def modis_fileID_to_datetime(modis_fileID):
+    # mFileID example: "A2017034.1255", where A is the satellite identifier, 2017 is the year, 034 is the day of the year, and 1255 is the time of the day in minutes
+    year = modis_fileID[1:5]
+    day_of_year = modis_fileID[5:8]
+    time = modis_fileID[9:13]
+    return pd.to_datetime(year + day_of_year + time, format="%Y%j%H%M")
+
+def datetime_to_modis_fileID(datetime):
+    return "A" + datetime.strftime("%Y%j.%H%M")
+
+def forward_mapping(long, lat):
+    # constants
+    R = 6371007.181     # radius of the Earth in meters
+    T = 1111950         # the height and width of each MODIS tile in the projection plane
+    xmin = -20015109    # the western limit of the projection plane
+    ymax = 10007555     # the northern limit of the projection plane
+    w = T / 1200        # the actual size of a 1km MODIS sinusoidal grid cell
+
+    # calculate the x and y coordinates
+    x = R * np.radians(long) * np.cos(np.radians(lat))
+    y = R * np.radians(lat)
+
+    # compute the horizontal (H) and vertical (V) tile coordinates
+    H = np.floor((x - xmin) / T).astype(int)
+    V = np.floor((ymax - y) / T).astype(int)
+
+    # calculate the row and column indices
+    i = np.floor(((ymax - y) % T)/ w).astype(int)
+    j = np.floor(((x - xmin) % T)/ w).astype(int)
+
+    return pd.DataFrame({"H": H, "V": V, "i": i, "j": j})
+
+def get_myd11a1_surface_temp(MYD11A1_folder, long, lat, L2_fileID):
+    # throw out time information, I only need the day of the year
+    MYD11A1_fileID = L2_fileID[:-5]
+
+    datetime = modis_fileID_to_datetime(L2_fileID)
+
+    # add year, month to the folder path for faster search
+    year_month = datetime.strftime("%Y/%m")
+    MYD11A1_folder = os.path.join(MYD11A1_folder, year_month)
+    # check whether MYD11A1_folder exists. If not throw an error
+    if not os.path.exists(MYD11A1_folder):
+        raise FileNotFoundError("The given MYD11A1 folder does not exist.")
+
+    tiles_and_indices = forward_mapping(long, lat)
+    tiles_to_pixel_id_dict = tiles_and_indices.groupby(["H", "V"]).groups
+
+    output_df = pd.DataFrame(columns=["mLST_day", "mLST_night", "pixel_id"])
+    for HV_tile, pixel_ids_in_tile in tiles_to_pixel_id_dict.items():
+        # read the MYD11A1 file
+        search_string = f"**/MYD11A1.{MYD11A1_fileID}.h{HV_tile[0]:02}v{HV_tile[1]:02}*.hdf"
+        file_path = glob.glob(search_string, root_dir=MYD11A1_folder, recursive=True)
+
+        # check if the file exists
+        if len(file_path) == 0:
+            print(f"MYD11A1 file with ID {MYD11A1_fileID}.h{HV_tile[0]:02}v{HV_tile[1]:02} not found.")
+            output_df = pd.concat([output_df, pd.DataFrame({"mLST_day": np.full(len(pixel_ids_in_tile), np.nan), "mLST_night": np.full(len(pixel_ids_in_tile), np.nan), "pixel_id": pixel_ids_in_tile})])
+            continue
+
+        # check if there are multiple files for the same day
+        if len(file_path) > 1:
+            print(f"Multiple MYD11A1 files with ID {MYD11A1_fileID} found.")
+            continue
+
+        # complete filepath
+        file_path = os.path.join(MYD11A1_folder, file_path[0])
+
+        # open the file
+        reader = SD(file_path)
+        LST_day = reader.select("LST_Day_1km").get()
+        LST_night = reader.select("LST_Night_1km").get()
+
+        # get valid range for LST from hdf file
+        valid_range = reader.select("LST_Day_1km").attributes().get("valid_range")
+
+        # replace LST with a masked array where values are not in range
+        LST_day = np.ma.masked_where((LST_day < valid_range[0]) | (LST_day > valid_range[1]), LST_day)
+        LST_night = np.ma.masked_where((LST_night < valid_range[0]) | (LST_night > valid_range[1]), LST_night)
+
+        # get scale factor
+        scale_factor_day = reader.select("LST_Day_1km").attributes().get("scale_factor")
+        scale_factor_night = reader.select("LST_Night_1km").attributes().get("scale_factor")
+
+        # apply scale factor
+        LST_day = scale_factor_day * LST_day
+        LST_night = scale_factor_night * LST_night
+
+        # # plot the LST
+        # import matplotlib.pyplot as plt
+        # plt.matshow(LST_day)
+        # plt.gca().set_title(f"LST Day, {datetime.strftime('%Y-%m-%d'), {HV_tile}}")
+        # plt.colorbar()
+        # plt.show()
+
+        # plt.matshow(LST_night)
+        # plt.gca().set_title(f"LST Night, {datetime.strftime('%Y-%m-%d'), {HV_tile}}")
+        # plt.colorbar()
+        # plt.show()
+
+        # only keep data at the pixel_ids_in_tile
+        LST_day = LST_day[tiles_and_indices.loc[pixel_ids_in_tile, "i"], tiles_and_indices.loc[pixel_ids_in_tile, "j"]].flatten()
+        LST_night = LST_night[tiles_and_indices.loc[pixel_ids_in_tile, "i"], tiles_and_indices.loc[pixel_ids_in_tile, "j"]].flatten()
+
+        # add the data to the output dataframe
+        output_df = pd.concat([output_df, pd.DataFrame({"mLST_day": LST_day, "mLST_night": LST_night, "pixel_id": pixel_ids_in_tile})])
+    
+    return output_df.sort_values(by="pixel_id").drop(columns=["pixel_id"])
+
+def get_myd11a2_surface_temp(MYD11A2_folder, long, lat, L2_fileID):
+    year = L2_fileID[1:5]
+    day_of_year = int(L2_fileID[5:8])
+    time = L2_fileID[9:13]
+
+    # floor the day of the year to a multiple of 8 + 1
+    multiple_of_8 = ((day_of_year - 1) // 8) * 8 + 1
+    datetime = pd.to_datetime(year + str(multiple_of_8).zfill(3) + time, format="%Y%j%H%M")
+    MYD11A2_fileID = datetime_to_modis_fileID(datetime)
+    # throw out time information, I only need the day of the year
+    MYD11A2_fileID = MYD11A2_fileID[:-5]
+
+    # add year, month to the folder path for faster search
+    year_month = datetime.strftime("%Y/%m")
+    MYD11A2_folder = os.path.join(MYD11A2_folder, year_month)
+    # check whether MYD11A2_folder exists. If not throw an error
+    if not os.path.exists(MYD11A2_folder):
+        raise FileNotFoundError("The given MYD11A1 folder does not exist.")
+
+    tiles_and_indices = forward_mapping(long, lat)
+    tiles_to_pixel_id_dict = tiles_and_indices.groupby(["H", "V"]).groups
+
+    output_df = pd.DataFrame(columns=["mLST_day", "mLST_night", "pixel_id"])
+    for HV_tile, pixel_ids_in_tile in tiles_to_pixel_id_dict.items():
+        # read the MYD11A1 file
+        search_string = f"**/MYD11A2.{MYD11A2_fileID}.h{HV_tile[0]:02}v{HV_tile[1]:02}*.hdf"
+        file_path = glob.glob(search_string, root_dir=MYD11A2_folder, recursive=True)
+
+        # check if the file exists
+        if len(file_path) == 0:
+            print(f"MYD11A1 file with ID {MYD11A2_fileID}.h{HV_tile[0]:02}v{HV_tile[1]:02} not found.")
+            output_df = pd.concat([output_df, pd.DataFrame({"mLST_day": np.full(len(pixel_ids_in_tile), np.nan), "mLST_night": np.full(len(pixel_ids_in_tile), np.nan), "pixel_id": pixel_ids_in_tile})])
+            continue
+
+        # check if there are multiple files for the same day
+        if len(file_path) > 1:
+            print(f"Multiple MYD11A2 files with ID {MYD11A2_fileID} found.")
+            continue
+
+        # complete filepath
+        file_path = os.path.join(MYD11A2_folder, file_path[0])
+
+        # open the file
+        reader = SD(file_path)
+        LST_day = reader.select("LST_Day_1km").get()
+        LST_night = reader.select("LST_Night_1km").get()
+
+        # get valid range for LST from hdf file
+        valid_range = reader.select("LST_Day_1km").attributes().get("valid_range")
+
+        # replace LST with a masked array where values are not in range
+        LST_day = np.ma.masked_where((LST_day < valid_range[0]) | (LST_day > valid_range[1]), LST_day)
+        LST_night = np.ma.masked_where((LST_night < valid_range[0]) | (LST_night > valid_range[1]), LST_night)
+
+        # get scale factor
+        scale_factor_day = reader.select("LST_Day_1km").attributes().get("scale_factor")
+        scale_factor_night = reader.select("LST_Night_1km").attributes().get("scale_factor")
+
+        # apply scale factor
+        LST_day = scale_factor_day * LST_day
+        LST_night = scale_factor_night * LST_night
+
+        # # plot the LST
+        # import matplotlib.pyplot as plt
+        # plt.matshow(LST_day)
+        # plt.gca().set_title(f"LST Day, {datetime.strftime('%Y-%m-%d'), {HV_tile}}")
+        # plt.colorbar()
+        # plt.show()
+
+        # plt.matshow(LST_night)
+        # plt.gca().set_title(f"LST Night, {datetime.strftime('%Y-%m-%d'), {HV_tile}}")
+        # plt.colorbar()
+        # plt.show()
+
+        # only keep data at the pixel_ids_in_tile
+        LST_day = LST_day[tiles_and_indices.loc[pixel_ids_in_tile, "i"], tiles_and_indices.loc[pixel_ids_in_tile, "j"]].flatten()
+        LST_night = LST_night[tiles_and_indices.loc[pixel_ids_in_tile, "i"], tiles_and_indices.loc[pixel_ids_in_tile, "j"]].flatten()
+
+        # add the data to the output dataframe
+        output_df = pd.concat([output_df, pd.DataFrame({"mLST_day": LST_day, "mLST_night": LST_night, "pixel_id": pixel_ids_in_tile})])
+    
+    return output_df.sort_values(by="pixel_id").set_index("pixel_id")
+
 def get_modis_geo_data(filepath, **kwargs):
     # parameter validation
     if not os.path.exists(filepath):
@@ -253,12 +516,6 @@ def get_modis_geo_data(filepath, **kwargs):
     except HDF4Error:
         print("The given MODIS file could not be opened.")
         return
-
-    # check if **kwargs contains the surface_datapath key. If it does, save the value in surface_product_path, otherwise, use the default values
-    if "surface_datapath" in kwargs["kwargs"]:
-        surface_product_path = kwargs["kwargs"]["surface_datapath"]
-    else:
-        surface_product_path = "/neodc/modis/data/MCD12C1/collection61"
     
     # get latitude and longitude
     latitude = reader.select("Latitude").get()
@@ -273,8 +530,6 @@ def get_modis_geo_data(filepath, **kwargs):
     # string is from 10 to 13
     year_list = np.full(latitude.shape, int(os.path.basename(filepath)[10:14]))
 
-    snow_ice_cover = get_snow_ice_cover_classification(surface_product_path, longitude, latitude, year_list)
-
     # get view zenith angle
     view_zenith_angle = reader.select("Sensor_Zenith").get() / 100
 
@@ -286,7 +541,22 @@ def get_modis_geo_data(filepath, **kwargs):
 
     # save the data into a dataframe with the column names as "mLong", "mLat", "mVZA", "mSZA"
     df = pd.DataFrame(np.array([longitude.flatten(), latitude.flatten(), view_zenith_angle.flatten(), solar_zenith_angle.flatten()]).transpose(), columns=["mLong", "mLat", "mVZA", "mSZA"], index=pixel_id)
-    df["mSnowIceCover"] = snow_ice_cover.flatten()
+    
+    if kwargs is None:
+        kwargs = {"kwargs":{}}
+    
+    # check if **kwargs contains the surface_datapath key. If it does, save the value in surface_product_path
+    if "surface_datapath" in kwargs["kwargs"]:
+        surface_product_path = kwargs["kwargs"]["surface_datapath"]
+        snow_ice_cover = get_snow_ice_cover_classification(surface_product_path, longitude, latitude, year_list)
+        df["mSnowIceCover"] = snow_ice_cover.flatten()
+
+    if "myd11_path" in kwargs["kwargs"]:
+        myd11_path = kwargs["kwargs"]["myd11_path"]
+        fileID = os.path.basename(filepath)[9:22]
+        surface_temp_df = get_myd11a2_surface_temp(myd11_path, longitude.flatten(), latitude.flatten(), fileID)
+
+        df = pd.concat([df, surface_temp_df], axis=1)
 
     return df
 
@@ -335,11 +605,42 @@ def get_modis_cloud_top_properties(filepath, **kwargs):
     # apply scale factor
     cloud_top_pressure = cloud_top_pressure * scale_factor
 
+    # now get emissivity data
+    emissivity_dataset_names = [
+        "cloud_emiss11_1km",
+        "cloud_emiss12_1km",
+        "cloud_emiss85_1km",
+    ]
+
+    emissivity_data = [0] * len(emissivity_dataset_names)
+
+    for index, emissivity_dataset_name in enumerate(emissivity_dataset_names):
+        emissivity_data[index] = reader.select(emissivity_dataset_name).get()[2::5, 2::5][:, :-1]
+
+        # get valid range for emissivity from hdf file
+        valid_range = reader.select(emissivity_dataset_name).attributes().get("valid_range")
+
+        # replace emissivity with a masked array where values are not in range
+        emissivity_data[index] = np.ma.masked_where((emissivity_data[index] < valid_range[0]) | (emissivity_data[index] > valid_range[1]), emissivity_data[index])
+
+        # get scale factor and offset
+        scale_factor = reader.select(emissivity_dataset_name).attributes().get("scale_factor")
+        offset = reader.select(emissivity_dataset_name).attributes().get("add_offset")
+
+        # apply scale factor and offset
+        emissivity_data[index] = scale_factor * (emissivity_data[index] - offset)
+
+    emissivities = dict(zip(emissivity_dataset_names, emissivity_data))
+
+    # calculate beta parameters
+    beta_11_12 = np.log(1 - emissivities["cloud_emiss11_1km"]) / np.log(1 - emissivities["cloud_emiss12_1km"])
+    beta_85_11 = np.log(1 - emissivities["cloud_emiss85_1km"]) / np.log(1 - emissivities["cloud_emiss11_1km"])
+
     # get pixel id
     pixel_id = pd.Series(np.arange(cloud_top_temp.shape[0] * cloud_top_temp.shape[1]), name="pixel_id")
 
     # save the data into a dataframe, with column names "mCloudTopTemp", "mCloudTopPressure", making sure only the masked data is kept
-    df = pd.DataFrame(np.ma.array([cloud_top_temp.flatten(), cloud_top_pressure.flatten()]).transpose(), columns=["mCloudTopTemp", "mCloudTopPressure"], index=pixel_id)
+    df = pd.DataFrame(np.ma.array([cloud_top_temp.flatten(), cloud_top_pressure.flatten(), beta_11_12.flatten(), beta_85_11.flatten()]).transpose(), columns=["mCloudTopTemp", "mCloudTopPressure", "mBeta11_12", "mBeta85_11"], index=pixel_id)
 
     return df
 
