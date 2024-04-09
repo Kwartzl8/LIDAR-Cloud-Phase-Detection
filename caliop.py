@@ -92,7 +92,7 @@ class Caliop_hdf_reader():
             v_range = np.asarray(valid_range.split("..."), dtype=data.dtype)
             # Some valid_ranges appear to have only one value, so ignore those...
             if len(v_range) == 2:
-                print("Masking all values {} < v < {}.".format(*v_range))
+                # print("Masking all values {} < v < {}.".format(*v_range))
                 data = np.ma.masked_outside(data, *v_range)
             else:
                 print("Invalid valid_range: {}. Not masking values.".format(valid_range))
